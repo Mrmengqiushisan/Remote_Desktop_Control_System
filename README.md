@@ -1,0 +1,2 @@
+# Remote_Desktop_Control_System
+构建一个MVC模型，实现远程桌面的访问，视频监视等等
