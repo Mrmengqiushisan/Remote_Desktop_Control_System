@@ -2,128 +2,10 @@
 #include "pch.h"
 #include "framework.h"
 #include "CWTool.h"
+#include "Packet.h"
+#include <list>
 #define BUFFER_SIZE 409600
-
-class CPacket {
-public:
-	CPacket() :sHead(0), nLength(0), sCmd(0), sSum(0) {}
-	CPacket(const CPacket& pack) {
-		sHead = pack.sHead;
-		nLength = pack.nLength;
-		sCmd = pack.sCmd;
-		sSum = pack.sSum;
-		strData = pack.strData;
-	}
-	CPacket& operator=(const CPacket& pack) {
-		if (this != &pack) {
-			sHead = pack.sHead;
-			nLength = pack.nLength;
-			sCmd = pack.sCmd;
-			sSum = pack.sSum;
-			strData = pack.strData;
-		}
-		return *this;
-	}
-	CPacket(WORD nCmd, const BYTE* pData, size_t nSize) {
-		sHead = 0xFEFF;
-		nLength = (DWORD)(nSize + 4);
-		sCmd = nCmd;
-		if (nSize > 0) {
-			strData.resize(nSize);
-			memcpy((void*)strData.c_str(), pData, nSize);
-		}
-		else strData.clear();
-		sSum = 0;
-		for (size_t j = 0; j < strData.size(); j++)
-			sSum += BYTE(pData[j]) & 0xFF;
-	}
-	//解包
-	CPacket(const BYTE* pData, size_t& nSize) :CPacket() {
-		size_t i = 0;
-		for (; i < nSize; i++) {
-			if (*(WORD*)(pData + i) == 0xFEFF) {
-				sHead = *(WORD*)(pData + i);
-				i = i + 2;
-				break;
-			}
-		}
-		//检查包长度
-		if (i + 4 + 2 + 2 > nSize) {
-			nSize = 0;
-			return;
-		}
-		nLength = *(DWORD*)(pData + i); i += 4;
-		if (nLength + i > nSize) {
-			nSize = 0;
-			return;
-		}
-		sCmd = *(WORD*)(pData + i); i += 2;
-		if (nLength > 4) {
-			strData.resize(nLength - 4);
-			memcpy((void*)strData.c_str(), pData + i, nLength - 4);
-			i += nLength - 4;
-		}
-		sSum = *(WORD*)(pData + i); i += 2;
-		WORD sum{ 0 };
-		for (size_t j = 0; j < strData.size(); j++) {
-			sum += BYTE(strData[j]) & 0xFF;
-		}
-		if (sum == sSum) {
-			nSize = i;
-			return;
-		}
-		nSize = 0;
-	}
-	WORD GetCmd() { return sCmd; }
-	std::string GetStrData() { return strData; }
-	int Size() {
-		return nLength + 6;
-	}
-	const char* Data() {
-		strOut.resize(nLength + 6);
-		BYTE* pData = (BYTE*)strOut.c_str();
-		*(WORD*)pData = sHead;							pData += 2;
-		*(DWORD*)(pData) = nLength;						pData += 4;
-		*(WORD*)pData = sCmd;							pData += 2;
-		memcpy(pData, strData.c_str(), strData.size());	pData += strData.size();
-		*(WORD*)pData = sSum;
-		return strOut.c_str();
-	}
-	~CPacket() {}
-private:
-	WORD		sHead;		//固定长度为 FE FF
-	DWORD		nLength;	//包长度
-	WORD		sCmd;		//控制命令
-	WORD		sSum;		//和校验
-	std::string	strData;	//包数据
-	std::string strOut;		//整个包的数据
-};
-
-typedef struct file_info {
-	BOOL isInvalid;         //是否有效
-	BOOL isDirectory;       //是否为目录0否1是
-	BOOL hasNext;           //是否还有后续文件0没有1有
-	char szFileName[MAX_PATH]{}; //文件名
-	file_info() {
-		isInvalid = FALSE;
-		isDirectory = -1;
-		hasNext = TRUE;
-		memset(szFileName, 0, sizeof(szFileName));
-	}
-}FILEINFO, * PFILEINFO;
-
-typedef struct MouseEvent {
-	WORD nAction;//点击，移动，双击
-	WORD nButton;//左键，右键，中键
-	POINT ptXY;	 //坐标
-	MouseEvent() {
-		nAction = 0;
-		nButton = -1;
-		ptXY.x = 0;
-		ptXY.y = 0;
-	}
-}MOUSEEV, * PMOUSEEV;
-
+typedef void(*SOCKET_CALLBACK)(void*, int, std::list<CPacket>&, CPacket&);
 class CServerSocket{
 public:
 	static CServerSocket* getInstance() {
@@ -132,7 +14,32 @@ public:
 		}
 		return m_instace;
 	}
-	bool InitSocket() {
+	int Run(SOCKET_CALLBACK callback, void* arg, short port = 9527) {
+		bool ret = InitSocket(port);
+		if (ret == false)return -1;
+		std::list<CPacket> lstPacket;
+		m_callback = callback;
+		m_arg = arg;
+		int count = 0;
+		while (true) {
+			if (AcceptClient() == false) {
+				if (count >= 3)return -2;
+				count++;
+			}
+			int ret = DealCommand();
+			if (ret > 0) {
+				m_callback(m_arg, ret, lstPacket, m_packet);
+				while (lstPacket.size() > 0) {
+					Send(lstPacket.front());
+					lstPacket.pop_front();
+				}
+			}
+			CloseClient();
+		}
+		return 0;
+	}
+protected:
+	bool InitSocket(short port) {
 		if (m_sock == INVALID_SOCKET) {
 			TRACE("creating socket failed,failed num=%d\n", GetLastError());
 			return false;
@@ -140,8 +47,8 @@ public:
 		sockaddr_in server_addr;
 		memset(&server_addr, 0, sizeof(server_addr));
 		server_addr.sin_family = AF_INET;
-		server_addr.sin_addr.S_un.S_addr = inet_addr("0.0.0.0");
-		server_addr.sin_port = htons(9527);
+		server_addr.sin_addr.S_un.S_addr = htonl(INADDR_ANY);//inet_addr("0.0.0.0")
+		server_addr.sin_port = htons(port);
 		if (bind(m_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
 			TRACE("bind failed,failed num=%d", GetLastError());
 			return false;
@@ -209,31 +116,18 @@ public:
 		//CWTool::Dump((BYTE*)pack.Data(), pack.Size());
 		return send(m_client, pack.Data(), pack.Size(), 0) > 0;
 	}
-	bool GetFilePath(std::string& strPath) {
-		if (m_packet.GetCmd() >= 2 && m_packet.GetCmd() <= 4 || m_packet.GetCmd() == 9) {
-			strPath = m_packet.GetStrData();
-			return true;
-		}
-		return false;
-	}
-	bool GetMouseEvent(MOUSEEV& mouse) {
-		if (m_packet.GetCmd() == 5) {
-			memcpy(&mouse, m_packet.GetStrData().c_str(), sizeof(MOUSEEV));
-			return true;
-		}
-		return false;
-	}
-	CPacket& GetPacket() {
-		return m_packet;
-	}
 	void CloseClient() {
-		closesocket(m_client);
-		m_client = INVALID_SOCKET;
+		if (m_client != INVALID_SOCKET) {
+			closesocket(m_client);
+			m_client = INVALID_SOCKET;
+		}
 	}
 private:
-	SOCKET	m_sock;
-	SOCKET	m_client;
-	CPacket m_packet;
+	void*			m_arg;
+	SOCKET			m_sock;
+	SOCKET			m_client;
+	CPacket			m_packet;
+	SOCKET_CALLBACK m_callback;
 	CServerSocket() :m_sock(INVALID_SOCKET), m_client(INVALID_SOCKET) {
 		if (InitSockEnv() == FALSE) {
 			MessageBox(NULL, _T("无法初始化套接字环境,请检查网络设置"), _T("初始化错误"), MB_OK | MB_ICONERROR);
