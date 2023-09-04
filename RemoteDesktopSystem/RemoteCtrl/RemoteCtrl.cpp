@@ -30,24 +30,12 @@ int MakeDriverInfo() {
             result += 'A' + i - 1;
         }
     }
+	result += ',';
     CPacket packet(1, (BYTE*)result.c_str(), result.size());
     CWTool::Dump((BYTE*)result.c_str(), result.size());
     CServerSocket::getInstance()->Send(packet);
     return 0;
 }
-
-typedef struct file_info {
-	BOOL isInvalid;         //是否有效
-	BOOL isDirectory;       //是否为目录0否1是
-	BOOL hasNext;           //是否还有后续文件0没有1有
-	char szFileName[MAX_PATH]{}; //文件名
-	file_info() {
-		isInvalid = FALSE;
-		isDirectory = -1;
-		hasNext = TRUE;
-		memset(szFileName, 0, sizeof(szFileName));
-	}
-}FILEINFO, * PFILEINFO;
 
 int MakeDriectoryInfo() {
     std::string strPath;
@@ -57,29 +45,33 @@ int MakeDriectoryInfo() {
 	}
     if (_chdir(strPath.c_str()) != 0) {
         FILEINFO finfo;
-        finfo.isDirectory = TRUE;
         finfo.hasNext = FALSE;
-        finfo.isInvalid = TRUE;
-        memcpy(finfo.szFileName, strPath.c_str(), strPath.size());
         CPacket pack(2, (BYTE*)&finfo, sizeof(finfo));
 		CServerSocket::getInstance()->Send(pack);
 		OutputDebugString(_T("没有权限访问目录！！"));
 		return -2;
     }
-    //查找文件索引
-    _finddata_t fdata;
-    int hfind = 0;
-    if (hfind = _findfirst("*", &fdata) == -1) {
+    _finddata_t fdata;////查找文件索引
+	intptr_t hfind = _findfirst("*", &fdata);//这行单独写出来比较好
+	if (hfind == -1) {
 		OutputDebugString(_T("没有找到任何文件！！"));
+		FILEINFO finfo;
+		finfo.hasNext = FALSE;
+		CPacket pack(2, (BYTE*)&finfo, sizeof(finfo));
+		CServerSocket::getInstance()->Send(pack);
 		return -3;
     }
+	int servercount{ 0 };
     do {
         FILEINFO finfo;
         finfo.isDirectory = (fdata.attrib & _A_SUBDIR) != 0;
-        memcpy(finfo.szFileName, fdata.name, sizeof(fdata.name));
+		memcpy(finfo.szFileName, fdata.name, sizeof(fdata.name));
+		TRACE("%s \r\n", finfo.szFileName);
         CPacket pack(2, (BYTE*)&finfo, sizeof(finfo));
         CServerSocket::getInstance()->Send(pack);
+		servercount++;
     } while (!_findnext(hfind, &fdata));
+	TRACE("servercount:%d\r\n", servercount);
 	//发送信息到控制端
 	FILEINFO finfo;
 	finfo.hasNext = FALSE;
@@ -109,9 +101,9 @@ int DownLoadFile() {
         return -1;
     }
     if (pFile != NULL) {
-        fseek(pFile, 0, SEEK_SET);
+		fseek(pFile, 0, SEEK_END);
         data = _ftelli64(pFile);
-        CPacket head(4, (BYTE*)data, 8);
+        CPacket head(4, (BYTE*)&data, 8);
         CServerSocket::getInstance()->Send(head);
         fseek(pFile, 0, SEEK_SET);
         char buffer[1024]{};
@@ -168,6 +160,7 @@ int MouseEvent() {
 		default:
 			break;
 		}
+		TRACE("mouse move: %08x x: %d y: %d\r\n", nFlags, mouse.ptXY.x, mouse.ptXY.y);
         switch (nFlags){
 		case 0x21://左键双击
 			mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, GetMessageExtraInfo());
@@ -224,6 +217,18 @@ int MouseEvent() {
 	return 0;
 }
 
+int DeleteLoaclFile() {
+	std::string strPath;
+	CServerSocket::getInstance()->GetFilePath(strPath);
+	TCHAR sPath[MAX_PATH] = _T("");
+	MultiByteToWideChar(CP_ACP, 0, strPath.c_str(), strPath.size(), sPath, sizeof(sPath) / sizeof(TCHAR));//将多字节转换为宽字节
+	DeleteFileA(strPath.c_str());
+	CPacket pack(9, NULL, 0);
+	int ret = CServerSocket::getInstance()->Send(pack);
+	TRACE("send ret=%d\r\n", ret);
+	return 0;
+}
+
 int SendScreen() {
 	CImage screen;
 	HDC hScreen = ::GetDC(NULL);
@@ -238,7 +243,7 @@ int SendScreen() {
 	IStream* pStream = NULL;
 	HRESULT res = CreateStreamOnHGlobal(hMem, TRUE, &pStream);
 	if (res == S_OK) {
-		screen.Save(_T("test2023.png"), Gdiplus::ImageFormatPNG);
+		screen.Save(pStream, Gdiplus::ImageFormatPNG);
 		//screen.Save(_T("test2023.tiff"), Gdiplus::ImageFormatTIFF);
 		//screen.Save(_T("test2023.jpg"), Gdiplus::ImageFormatJPEG);
 		LARGE_INTEGER bg{ 0 };
@@ -268,7 +273,7 @@ unsigned int _stdcall threadLockDlg(void* arg) {
 	TRACE("right=%d,bottom=%d\r\n", rect.right, rect.bottom);
 	dlg.MoveWindow(rect);
 	//窗口置顶
-	dlg.SetWindowPos(&dlg.wndNoTopMost, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+	dlg.SetWindowPos(&dlg.wndTopMost, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
 	ShowCursor(false);//将鼠标设置为不可见的
 	::ShowWindow(::FindWindow(_T("Shell_TrayWnd"), NULL), SW_HIDE);//将任务栏隐藏
 	//设置鼠标范围
@@ -308,6 +313,57 @@ int UnLockMachine() {
 	CServerSocket::getInstance()->Send(pack);
 	return 0;
 }
+int TestConnect() {
+	CPacket pack(1981, NULL, 0);
+	int ret = CServerSocket::getInstance()->Send(pack);
+	TRACE("Send ret=%d\r\n", ret);
+	return 0;
+}
+int ExcuteCommand(int nCmd) {
+	int ret = 0;
+	switch (nCmd)
+	{
+	case 1://查看磁盘分区
+		ret = MakeDriverInfo();
+		break;
+	case 2://查看指定目录下的文件
+		ret = MakeDriectoryInfo();
+		break;
+	case 3://打开文件
+		ret = RunFile();
+		break;
+	case 4://下载文件
+		ret = DownLoadFile();
+		break;
+	case 5://鼠标操作
+		ret = MouseEvent();
+		break;
+	case 6://发送屏幕内容==>发送屏幕的截图
+		ret = SendScreen();
+		break;
+	case 7://锁机
+		ret = LockMachine();
+		break;
+	case 8://解锁
+		ret = UnLockMachine();
+		break;
+	case 9:
+		ret = DeleteLoaclFile();
+		break;
+	case 1981:
+		ret = TestConnect();
+		break;
+	default:
+		break;
+	}
+	return 0;
+	/*Sleep(5000);
+			UnLockMachine();
+			TRACE("m_hwnd=%08X\r\n", dlg.m_hWnd);
+			while (dlg.m_hWnd != nullptr) {
+				Sleep(10);
+			}*/
+}
 int main()
 {
     int nRetCode = 0;
@@ -325,53 +381,34 @@ int main()
         }
         else
         {
-    //        CServerSocket* pserver = CServerSocket::getInstance();
-    //        int count{ 0 };
-    //        if (pserver->InitSocket() == false) {
-				//MessageBox(NULL, _T("网络初始化异常，未能成功初始化，请检查网络状态"), _T("网络初始化失败"), MB_OK | MB_ICONERROR);
-				//exit(0);
-    //        }
-    //        while (CServerSocket::getInstance() != NULL) {
-    //            if (pserver->AcceptClient() == false) {
-    //                if (count >= 3) {
-				//		MessageBox(NULL, _T("多次无法接入用户，结束程序"), _T("接入用户失败！"), MB_OK | MB_ICONERROR);
-				//		exit(0);
-    //                }
-				//	MessageBox(NULL, _T("无法正常接入用户，自动重试"), _T("接入用户失败！"), MB_OK | MB_ICONERROR);
-				//	count++;
-    //            }
-    //            int ret = pserver->DealCommand();
-    //            //TODO:处理业务逻辑
-    //        }
-            int cmd = 6;
-            switch (cmd)
-            {
-            case 1:
-                MakeDriverInfo();
-            case 2:
-                MakeDriectoryInfo();
-			case 3://打开文件
-				RunFile();
-				break;
-			case 4:
-				DownLoadFile();
-				break;
-			case 5:
-				MouseEvent();
-				break;
-			case 6:
-				SendScreen();
-			case 7://锁机
-				LockMachine();
-				Sleep(50);
-				LockMachine();
-				break;
-			case 8://解锁
-				UnLockMachine();
-				break;
-            default:
-                break;
+            CServerSocket* pserver = CServerSocket::getInstance();
+            int count{ 0 };
+            if (pserver->InitSocket() == false) {
+				MessageBox(NULL, _T("网络初始化异常，未能成功初始化，请检查网络状态"), _T("网络初始化失败"), MB_OK | MB_ICONERROR);
+				exit(0);
             }
+            while (CServerSocket::getInstance() != NULL) {
+                if (pserver->AcceptClient() == false) {
+                    if (count >= 3) {
+						MessageBox(NULL, _T("多次无法接入用户，结束程序"), _T("接入用户失败！"), MB_OK | MB_ICONERROR);
+						exit(0);
+                    }
+					MessageBox(NULL, _T("无法正常接入用户，自动重试"), _T("接入用户失败！"), MB_OK | MB_ICONERROR);
+					count++;
+                }
+				TRACE("AcceptClient return true\r\n");
+                int ret = pserver->DealCommand();
+				TRACE("DealCommand :%d\r\n", ret);
+				if (ret > 0) {
+					ret = ExcuteCommand(ret);
+					if (ret != 0) {
+						TRACE("执行命令失败:%d,ret=%d\r\n", pserver->GetPacket().GetCmd(), ret);
+					}
+					pserver->CloseClient();
+					TRACE("Command has Done\r\n");
+				}
+            }
+            
         }
     }
     else
