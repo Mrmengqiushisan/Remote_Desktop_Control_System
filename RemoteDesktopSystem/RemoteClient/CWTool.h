@@ -28,5 +28,26 @@ public:
 		LocalFree(lpMsgBuf);
 		return res;
 	}
+
+	static int ByteToImage(CImage& image,const std::string& strBuffer) {
+		BYTE* pData = (BYTE*)strBuffer.c_str();
+		HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, 0);
+		if (hMem == NULL) {
+			TRACE("ÄÚ´æ²»×ã!!!");
+			Sleep(1);
+			return -1;;
+		}
+		IStream* pStream = NULL;
+		HRESULT hRet = CreateStreamOnHGlobal(hMem, true, &pStream);
+		if (hRet == S_OK) {
+			ULONG length = 0;
+			pStream->Write(pData, strBuffer.size(), &length);
+			LARGE_INTEGER bg{ 0 };
+			pStream->Seek(bg, STREAM_SEEK_SET, NULL);
+			if ((HBITMAP)image != NULL)image.Destroy();
+			image.Load(pStream);
+		}
+		return hRet;
+	}
 };
 

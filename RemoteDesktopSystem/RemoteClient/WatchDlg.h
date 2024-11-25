@@ -19,9 +19,19 @@ public:
 public:
 	int m_nObjWidth;
 	int m_nObjHeight;
+	inline bool isFull()const {
+		return m_isFull;
+	}
+	inline void SetImageStatus(bool isFull = false) {
+		m_isFull = isFull;
+	}
+	inline CImage& GetImage() {
+		return m_image;
+	}
 protected:
+	bool	m_isFull;	//缓存是否有数据 true 表示有缓存数据 false 表示没有缓存数据
+	CImage	m_image;//缓存
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV 支持
-
 	DECLARE_MESSAGE_MAP()
 public:
 	afx_msg void OnTimer(UINT_PTR nIDEvent);

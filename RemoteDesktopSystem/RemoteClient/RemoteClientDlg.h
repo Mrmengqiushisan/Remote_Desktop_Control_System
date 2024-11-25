@@ -6,7 +6,6 @@
 #include "ClientSocket.h"
 #include "StatusDlg.h"
 #include "WatchDlg.h"
-#define WM_SEND_PACKET (WM_USER+1)//发送数据包消息
 // CRemoteClientDlg 对话框
 class CRemoteClientDlg : public CDialogEx
 {
@@ -20,38 +19,12 @@ public:
 #endif
 
 private:
-	CImage	m_image;	//缓存
-	bool	m_isFull;	//缓存是否有数据 true 表示有缓存数据 false 表示没有缓存数据
-	bool	m_isClosed;	//监视是否关闭
-	static void __cdecl threadEntryForDownFile(void* arg);
-	static void __cdecl threadEntryForWatchData(void* arg);
-	void threadWatchData();
-	void threadDownFile();
 public:
-	inline bool isFull()const {
-		return m_isFull;
-	}
-	inline CImage& GetImage() {
-		return m_image;
-	}
-	inline void SetImageStatus(bool isFull = false) {
-		m_isFull = isFull;
-	}
+	
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);	// DDX/DDV 支持
 private:
-	//1 查看磁盘分区 
-	// 2查看指定目录下的文件 
-	// 3打开文件 
-	// 4下载文件
-	// 5鼠标操作
-	// 6发送屏幕内容
-	// 7锁机
-	// 8解锁
-	// 9删除文件
-	// 1981测试连接
-	//返回值为命令 如果小于0 为错误
-	int SendCommandPacket(int nCmd, bool bAutoClose = true, BYTE* pData = nullptr, size_t nlength = 0);
+	
 	//删除树中对象
 	void DeleteTreeChildrenItem(HTREEITEM hTree);
 	//获取路径
@@ -83,6 +56,7 @@ public:
 	afx_msg void OnDownloadFile();
 	afx_msg void OnDeleteFile();
 	afx_msg void OnRunFile();
-	afx_msg LRESULT OnSendPacket(WPARAM wParam, LPARAM lParam);//自定义消息函数
 	afx_msg void OnBnClickedBtnStartWatch();
+	afx_msg void OnIpnFieldchangedIpaddress1serv(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg void OnEnChangeEditPort();
 };

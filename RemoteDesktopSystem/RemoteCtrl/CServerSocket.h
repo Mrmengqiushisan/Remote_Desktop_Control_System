@@ -4,7 +4,7 @@
 #include "CWTool.h"
 #include "Packet.h"
 #include <list>
-#define BUFFER_SIZE 409600
+#define BUFFER_SIZE 4096
 typedef void(*SOCKET_CALLBACK)(void*, int, std::list<CPacket>&, CPacket&);
 class CServerSocket{
 public:

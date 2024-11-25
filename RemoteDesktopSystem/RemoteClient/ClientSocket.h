@@ -1,21 +1,24 @@
 #pragma once
-#include"pch.h"
-#include"framework.h"
-#include<string>
+#include "pch.h"
+#include "framework.h"
 #include "CWTool.h"
 #include <vector>
+#include <map>
+#include <list>
+#include <string>
 #define  BUFFER_SIZE 409600
 class CPacket {
 public:
-	CPacket() :sHead(0), nLength(0), sCmd(0), sSum(0) {}
+	CPacket() :sHead(0), nLength(0), sCmd(0), sSum(0), hEvent(INVALID_HANDLE_VALUE) {}
 	CPacket(const CPacket& pack) {
 		sHead = pack.sHead;
 		nLength = pack.nLength;
 		sCmd = pack.sCmd;
 		sSum = pack.sSum;
 		strData = pack.strData;
+		hEvent = pack.hEvent;
 	}
-	CPacket(WORD nCmd, const BYTE* pData, size_t nSize) {
+	CPacket(WORD nCmd, const BYTE* pData, size_t nSize,HANDLE hEvent) {
 		sHead = 0xFEFF;
 		nLength = (DWORD)(nSize + 4);
 		sCmd = nCmd;
@@ -27,6 +30,7 @@ public:
 		sSum = 0;
 		for (size_t j = 0; j < strData.size(); j++)
 			sSum += BYTE(strData[j]) & 0xFF;
+		this->hEvent = hEvent;
 	}
 	CPacket& operator=(const CPacket& pack) {
 		if (this == &pack)return *this;
@@ -35,6 +39,7 @@ public:
 		sCmd = pack.sCmd;
 		sSum = pack.sSum;
 		strData = pack.strData;
+		hEvent = pack.hEvent;
 		return *this;
 	}
 
@@ -76,7 +81,7 @@ public:
 	int Size() {//报数据的大小
 		return nLength + 6;
 	}
-	const char* Data() {
+	const char* Data(std::string& strOut) const {
 		strOut.resize(nLength + 6);
 		BYTE* pData = (BYTE*)strOut.c_str();
 		*(WORD*)pData = sHead;		pData += 2;
@@ -93,7 +98,7 @@ public:
 	WORD		sCmd;		//控制命令
 	std::string strData;	//包数据
 	WORD		sSum;		//和校验
-	std::string strOut;		//整个包的数据
+	HANDLE		hEvent;
 };
 
 typedef struct file_info {
@@ -129,7 +134,7 @@ public:
 		}
 		return m_instance;
 	}
-	bool InitSocket(int nIP, int nPort) {
+	bool InitSocket() {
 		if (m_sock != INVALID_SOCKET)CloseSocket();
 		m_sock = socket(PF_INET, SOCK_STREAM, 0);
 		if (m_sock == INVALID_SOCKET) {
@@ -139,8 +144,8 @@ public:
 		sockaddr_in servadr;
 		memset(&servadr, 0, sizeof(servadr));
 		servadr.sin_family = AF_INET;
-		servadr.sin_addr.S_un.S_addr = htonl(nIP);
-		servadr.sin_port = htons(nPort);
+		servadr.sin_addr.S_un.S_addr = htonl(m_nIP);
+		servadr.sin_port = htons(m_nPort);
 		if (servadr.sin_addr.S_un.S_addr == INADDR_NONE) {
 			AfxMessageBox("指定的IP地址不存在");
 			return false;
@@ -159,13 +164,17 @@ public:
 		static size_t index{ 0 };
 		while (true) {
 			size_t len = recv(m_sock, buffer + index, (int)(BUFFER_SIZE - index), 0);
-			if (len <= 0 && index == 0) {
+			CWTool::Dump((BYTE*)buffer, index);
+			if ((int)len <= 0 && (int)index == 0) {
 				TRACE("recv faliled,Failed num=%d\n", GetLastError());
 				return -1;
 			}
+			TRACE("recv len=%d(0x%08X) index=%d(0x%08X)\r\n", len, len, index, index);
 			index += len;
 			len = index;
+			TRACE("recv len=%d(0x%08X) index=%d(0x%08X)\r\n", len, len, index, index);
 			m_packet = CPacket((BYTE*)buffer, (size_t)len);
+			TRACE("command %d\r\n", m_packet.sCmd);
 			if (len > 0) {
 				memmove(buffer, buffer + len, index - len);
 				index -= len;
@@ -178,10 +187,28 @@ public:
 		if (m_sock == -1)return FALSE;
 		return send(m_sock, pData, nSize, 0) > 0;
 	}
-	bool Send(CPacket& pack) {
+	bool SendPacket(const CPacket& pack, std::list<CPacket>& lstPacks) {
+		if (m_sock == INVALID_SOCKET) {
+			if (InitSocket() == false)return false;
+			_beginthread(&CClientSocket::threadEntry, 0, this);
+		}
+		m_lstSend.push_back(pack);
+		WaitForSingleObject(pack.hEvent, INFINITE);
+		auto it = m_mapAck.find(pack.hEvent);
+		if (it != m_mapAck.end()) {
+			for (auto i = it->second.begin(); i != it->second.end(); i++)
+				lstPacks.push_back(*i);
+			m_mapAck.erase(it);
+			return true;
+		}
+		return false;
+	}
+	bool Send(const CPacket& pack) {
 		TRACE("m_sock= %d\r\n", m_sock);
 		if (m_sock == -1)return FALSE;
-		return send(m_sock, pack.Data(), pack.Size(), 0) > 0;
+		std::string strOut;
+		pack.Data(strOut);
+		return send(m_sock, strOut.c_str(), strOut.size(), 0) > 0;
 	}
 	bool GetFilePath(std::string& strPath) {
 		if (m_packet.sCmd >= 2 && m_packet.sCmd <= 4) {
@@ -205,16 +232,37 @@ public:
 		closesocket(m_sock);
 		m_sock = INVALID_SOCKET;
 	}
+	void UpDateAddress(int nIP, int nPort) {
+		m_nIP = nIP;
+		m_nPort = nPort;
+	}
 private:
+	bool m_bAutoClosed;
+	int m_nIP;
+	int m_nPort;
 	std::vector<char> m_buffer;
+	std::list<CPacket>m_lstSend;
+	std::map<HANDLE, std::list<CPacket>>m_mapAck;
+	std::map<HANDLE, bool>m_mapAutoClosed;
 	SOCKET m_sock;
 	CPacket m_packet;
 	inline static CClientSocket* m_instance = NULL;
-	CClientSocket& operator=(const CClientSocket&) {}//赋值运算符
+	CClientSocket& operator=(const CClientSocket& ss) {
+		if (this != &ss) {
+			m_sock = ss.m_sock;
+			m_nIP = ss.m_nIP;
+			m_nPort = ss.m_nPort;
+			m_bAutoClosed = ss.m_bAutoClosed;
+		}
+		return *this;
+	}//赋值运算符
 	CClientSocket(const CClientSocket& ss) {//拷贝构造函数
 		m_sock = ss.m_sock;
+		m_nIP = ss.m_nIP;
+		m_nPort = ss.m_nPort;
+		m_bAutoClosed = ss.m_bAutoClosed;
 	}
-	CClientSocket() :m_sock(INVALID_SOCKET) {
+	CClientSocket() :m_nIP(INADDR_ANY), m_nPort(9527), m_sock(INVALID_SOCKET),m_bAutoClosed(true) {
 		if (InitSockEnv() == FALSE) {
 			MessageBox(NULL, _T("无法初始化套接字环境,请检查网络设置"), _T("初始化错误"), MB_OK | MB_ICONERROR);
 			exit(0);
@@ -231,6 +279,8 @@ private:
 		closesocket(m_sock);
 		WSACleanup();
 	}
+	static void threadEntry(void* arg);
+	void threadFunc();
 	bool InitSockEnv() {
 		WSAData data;
 		int err;
